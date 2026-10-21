@@ -45,8 +45,13 @@ only listens on `127.0.0.1` and the Tailscale address, never your LAN.
 
 ## 2. Install the phone app
 
-Build the APK on the PC (Android Studio: open the `android` folder and press Run,
-or from a terminal):
+Easiest: on the phone, download `tether-<version>.apk` from the
+[Releases](https://github.com/muhmd-sinan/tether/releases) page and open it
+(allow installing from your browser or file manager when asked).
+
+Or build it yourself (Android Studio: open the `android` folder and press Run,
+or from a terminal). If you switch between the release APK and your own build,
+uninstall the old one first: they are signed with different keys.
 
 ```bat
 cd android
