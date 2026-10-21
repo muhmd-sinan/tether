@@ -26,7 +26,11 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Draws a session at phone size without resizing the PTY.
+ * Draws a session at phone size.
+ *
+ * The view reports its own grid size to the agent, which gives the PTY that
+ * size whenever the phone was the last to type. While the PC drives, the PTY
+ * is wider than the phone and the layout below adapts.
  *
  * Normal screen: output is reflowed to the view width (see [WrapLayout]) and
  * scrolls vertically, pinned to the bottom unless the user scrolls back.
@@ -45,6 +49,7 @@ class TerminalCanvasView(context: Context) : View(context) {
             value?.onUpdate = ::onTerminalUpdate
             resetScroll()
             invalidate()
+            scheduleSizeReport()
         }
 
     var fontSizeSp = 13f
@@ -54,6 +59,7 @@ class TerminalCanvasView(context: Context) : View(context) {
             field = v
             measureCells()
             invalidate()
+            scheduleSizeReport()
         }
 
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.MONOSPACE }
@@ -97,6 +103,31 @@ class TerminalCanvasView(context: Context) : View(context) {
 
     private fun onTerminalUpdate() = invalidate()
 
+    // ---- size reporting ----------------------------------------------------
+
+    // Debounced: the keyboard sliding in and pinch-zoom produce bursts of sizes.
+    private val reportSize = Runnable {
+        if (width > 0 && height > 0) {
+            val cols = (width / cellW).toInt()
+            val rows = (height / cellH).toInt()
+            connection?.reportSize(cols, rows)
+            onGrid?.invoke(cols, rows)
+        }
+    }
+
+    /** Told every reported grid size, so new sessions can start at it. */
+    var onGrid: ((Int, Int) -> Unit)? = null
+
+    private fun scheduleSizeReport() {
+        removeCallbacks(reportSize)
+        postDelayed(reportSize, 150)
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        scheduleSizeReport()
+    }
+
     private fun resetScroll() {
         anchor = null
         scrollAccum = 0f
@@ -110,6 +141,8 @@ class TerminalCanvasView(context: Context) : View(context) {
     // ---- drawing ----------------------------------------------------------
 
     override fun onDraw(canvas: Canvas) {
+        // Compose's host view doesn't clip children, so drawColor would paint over the top bar.
+        canvas.clipRect(0, 0, width, height)
         canvas.drawColor(Palette.BG)
         val conn = connection ?: return
         val e = conn.emulator ?: return
@@ -227,16 +260,31 @@ class TerminalCanvasView(context: Context) : View(context) {
         textPaint.textSkewX = if (effect and TextStyle.CHARACTER_ATTRIBUTE_ITALIC != 0) -0.25f else 0f
         textPaint.isUnderlineText = underline
         textPaint.isStrikeThruText = effect and TextStyle.CHARACTER_ATTRIBUTE_STRIKETHROUGH != 0
-        val measured = if (cp < 128) asciiW[cp] else textPaint.measureText(text, idx, len)
+        var t = text
+        var ti = idx
+        var tl = len
+        if (cp >= 128) substitute(cp)?.let { t = it; ti = 0; tl = it.size }
+        val measured = if (cp < 128) asciiW[cp] else textPaint.measureText(t, ti, tl)
         if (measured > 0f && abs(measured - cw) > 0.5f) {
             // Glyph wider/narrower than its cells (emoji, CJK fallback): squeeze to fit.
             c.save()
             c.scale(cw / measured, 1f, x, y)
-            c.drawText(text, idx, len, x, y + ascent, textPaint)
+            c.drawText(t, ti, tl, x, y + ascent, textPaint)
             c.restore()
         } else {
-            c.drawText(text, idx, len, x, y + ascent, textPaint)
+            c.drawText(t, ti, tl, x, y + ascent, textPaint)
         }
+    }
+
+    // Per code point: null if the font (with fallbacks) draws it, else the lookalike to draw.
+    private val substitutes = HashMap<Int, CharArray?>()
+
+    private fun substitute(cp: Int): CharArray? {
+        if (substitutes.containsKey(cp)) return substitutes[cp]
+        val sub = if (textPaint.hasGlyph(String(Character.toChars(cp)))) null
+            else Glyphs.lookalikes(cp).firstOrNull(textPaint::hasGlyph)?.toCharArray()
+        substitutes[cp] = sub
+        return sub
     }
 
     // ---- alternate screen pan --------------------------------------------
@@ -347,7 +395,12 @@ class TerminalCanvasView(context: Context) : View(context) {
                 val ed = editable ?: return
                 val s = ed.toString()
                 ed.clear()
-                if (s.isNotEmpty()) type(s)
+                when {
+                    s.isEmpty() -> {}
+                    // Clipboard suggestion or voice input with line breaks: one paste, not N Enters.
+                    s.length > 1 && ('\n' in s || '\r' in s) -> connection?.paste(s)
+                    else -> type(s)
+                }
             }
         }
     }

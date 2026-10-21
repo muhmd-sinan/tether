@@ -14,18 +14,25 @@ import org.json.JSONObject
 
 data class SessionInfo(val id: String, val name: String, val shell: String, val pcViewers: Int)
 
-/** Control channel: the live session list plus new/close/rename commands. */
+/** A folder Claude Code has been used in on the PC. */
+data class Project(val path: String, val name: String)
+
+/** Control channel: the live session list, new/close/rename, projects and alerts. */
 class AgentClient(
     private val http: OkHttpClient,
     val baseUrl: String,
     private val onSessions: (List<SessionInfo>) -> Unit,
     private val onCreated: (String) -> Unit,
+    private val onAlert: (id: String, name: String, message: String) -> Unit,
 ) {
     enum class Link { Connecting, Online, Offline }
 
     var link by mutableStateOf(Link.Connecting)
         private set
     var error by mutableStateOf<String?>(null)
+    /** Recent Claude Code folders; null until the PC answers a [requestProjects]. */
+    var projects by mutableStateOf<List<Project>?>(null)
+        private set
 
     private val main = Handler(Looper.getMainLooper())
     private var ws: WebSocket? = null
@@ -53,7 +60,17 @@ class AgentClient(
         open()
     }
 
-    fun newSession(shell: String) = send(JSONObject().put("type", "new").put("shell", shell))
+    fun newSession(shell: String, size: Pair<Int, Int>?, cwd: String? = null) {
+        val msg = JSONObject().put("type", "new").put("shell", shell)
+        size?.let { msg.put("cols", it.first).put("rows", it.second) }
+        cwd?.let { msg.put("cwd", it) }
+        send(msg)
+    }
+
+    fun requestProjects() {
+        projects = null
+        send(JSONObject().put("type", "projects"))
+    }
     fun close(id: String) = send(JSONObject().put("type", "close").put("id", id))
     fun rename(id: String, name: String) = send(JSONObject().put("type", "rename").put("id", id).put("name", name))
 
@@ -97,6 +114,14 @@ class AgentClient(
                 })
             }
             "created" -> onCreated(msg.getString("id"))
+            "projects" -> {
+                val arr = msg.getJSONArray("projects")
+                projects = (0 until arr.length()).map { i ->
+                    val p = arr.getJSONObject(i)
+                    Project(p.getString("path"), p.getString("name"))
+                }
+            }
+            "alert" -> onAlert(msg.getString("id"), msg.optString("name"), msg.optString("message"))
             "error" -> error = msg.optString("message")
         }
     }

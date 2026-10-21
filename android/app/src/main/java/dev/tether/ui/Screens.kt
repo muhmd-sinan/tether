@@ -3,7 +3,15 @@ package dev.tether.ui
 import android.view.KeyEvent
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Checkbox
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -82,7 +90,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import dev.tether.TetherViewModel
+import dev.tether.TetherState
 import dev.tether.net.AgentClient
 import dev.tether.net.SessionConnection
 import dev.tether.net.SessionInfo
@@ -94,7 +102,7 @@ private val Mono = TextStyle(fontFamily = FontFamily.Monospace)
 // ---- connect -----------------------------------------------------------------
 
 @Composable
-fun ConnectScreen(vm: TetherViewModel) {
+fun ConnectScreen(vm: TetherState) {
     var host by rememberSaveable { mutableStateOf(vm.lastHost) }
     var port by rememberSaveable { mutableStateOf(vm.port.toString()) }
     val portNum = port.toIntOrNull()?.takeIf { it in 1..65535 }
@@ -139,15 +147,17 @@ fun ConnectScreen(vm: TetherViewModel) {
 // ---- main ----------------------------------------------------------------------
 
 @Composable
-fun MainScreen(vm: TetherViewModel) {
+fun MainScreen(vm: TetherState) {
     var renameTarget by remember { mutableStateOf<SessionInfo?>(null) }
     var closeTarget by remember { mutableStateOf<SessionInfo?>(null) }
+    var pickProject by remember { mutableStateOf(false) }
+    val startClaude = { vm.requestProjects(); pickProject = true }
 
     Column(Modifier.fillMaxSize().background(Tokens.Bg).windowInsetsPadding(WindowInsets.safeDrawing)) {
-        TopBar(vm, onRename = { renameTarget = it }, onClose = { closeTarget = it })
+        TopBar(vm, onRename = { renameTarget = it }, onClose = { closeTarget = it }, onClaude = startClaude)
         StatusLine(vm)
         if (vm.sessions.isEmpty()) {
-            EmptyState(vm, Modifier.weight(1f))
+            EmptyState(vm, Modifier.weight(1f), onClaude = startClaude)
         } else {
             SessionPager(vm, Modifier.weight(1f))
             ExtraKeys(vm)
@@ -184,10 +194,65 @@ fun MainScreen(vm: TetherViewModel) {
             dismissButton = { TextButton(onClick = { closeTarget = null }) { Text("Keep running") } },
         )
     }
+
+    if (pickProject) {
+        ProjectPicker(vm, onPick = { path -> pickProject = false; vm.newClaudeSession(path) },
+            onDismiss = { pickProject = false })
+    }
+}
+
+/** Folder for a new Claude Code session: the PC's recent Claude projects, or any path. */
+@Composable
+private fun ProjectPicker(vm: TetherState, onPick: (String) -> Unit, onDismiss: () -> Unit) {
+    val projects = vm.agent?.projects
+    var other by rememberSaveable { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Start Claude Code in") },
+        text = {
+            Column {
+                when {
+                    projects == null -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Tokens.Accent)
+                        Spacer(Modifier.width(12.dp))
+                        Text("Loading recent folders", color = Tokens.Dim)
+                    }
+                    projects.isEmpty() -> Text("No recent Claude Code folders on the PC.", color = Tokens.Dim)
+                    else -> Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
+                        projects.forEach { p ->
+                            Column(
+                                Modifier.fillMaxWidth().clickable(onClickLabel = "Start here") { onPick(p.path) }
+                                    .padding(vertical = 10.dp),
+                            ) {
+                                Text(p.name, color = Tokens.Ink, style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(p.path, color = Tokens.Dim, style = Mono.copy(fontSize = 12.sp),
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+                OutlinedTextField(
+                    value = other, onValueChange = { other = it },
+                    label = { Text("Other folder") }, placeholder = { Text("C:\\path\\to\\project") },
+                    singleLine = true, textStyle = Mono,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(onGo = { if (other.isNotBlank()) onPick(other.trim()) }),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onPick(other.trim()) }, enabled = other.isNotBlank()) { Text("Start") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
-private fun TopBar(vm: TetherViewModel, onRename: (SessionInfo) -> Unit, onClose: (SessionInfo) -> Unit) {
+private fun TopBar(vm: TetherState, onRename: (SessionInfo) -> Unit, onClose: (SessionInfo) -> Unit,
+                   onClaude: () -> Unit) {
     var addOpen by remember { mutableStateOf(false) }
     var moreOpen by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -204,6 +269,7 @@ private fun TopBar(vm: TetherViewModel, onRename: (SessionInfo) -> Unit, onClose
                 Icon(Icons.Outlined.Add, contentDescription = "New session", tint = Tokens.Ink)
             }
             DropdownMenu(expanded = addOpen, onDismissRequest = { addOpen = false }) {
+                DropdownMenuItem(text = { Text("Claude Code…") }, onClick = { addOpen = false; onClaude() })
                 DropdownMenuItem(text = { Text("New PowerShell") }, onClick = { addOpen = false; vm.newSession("powershell") })
                 DropdownMenuItem(text = { Text("New cmd") }, onClick = { addOpen = false; vm.newSession("cmd") })
             }
@@ -213,6 +279,12 @@ private fun TopBar(vm: TetherViewModel, onRename: (SessionInfo) -> Unit, onClose
                 Icon(Icons.Outlined.MoreVert, contentDescription = "More options", tint = Tokens.Dim)
             }
             DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Background alerts") },
+                    trailingIcon = { Checkbox(checked = vm.backgroundAlerts, onCheckedChange = null) },
+                    onClick = { vm.updateBackgroundAlerts(!vm.backgroundAlerts) },
+                    modifier = Modifier.semantics { role = Role.Checkbox },
+                )
                 DropdownMenuItem(text = { Text("Change PC") }, onClick = { moreOpen = false; vm.forgetHost() })
             }
         }
@@ -221,7 +293,7 @@ private fun TopBar(vm: TetherViewModel, onRename: (SessionInfo) -> Unit, onClose
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SessionTabs(vm: TetherViewModel, onRename: (SessionInfo) -> Unit, onClose: (SessionInfo) -> Unit) {
+private fun SessionTabs(vm: TetherState, onRename: (SessionInfo) -> Unit, onClose: (SessionInfo) -> Unit) {
     val index = vm.sessions.indexOfFirst { it.id == vm.selected }.coerceAtLeast(0)
     var menuFor by remember { mutableStateOf<String?>(null) }
     ScrollableTabRow(
@@ -251,6 +323,10 @@ private fun SessionTabs(vm: TetherViewModel, onRename: (SessionInfo) -> Unit, on
                 contentAlignment = Alignment.Center,
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (s.shell == "claude") {
+                        Box(Modifier.size(6.dp).background(Tokens.Accent, CircleShape))
+                        Spacer(Modifier.width(6.dp))
+                    }
                     Text(s.name, color = if (selected) Tokens.Ink else Tokens.Dim,
                         style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (s.pcViewers > 0) {
@@ -269,7 +345,7 @@ private fun SessionTabs(vm: TetherViewModel, onRename: (SessionInfo) -> Unit, on
 }
 
 @Composable
-private fun StatusLine(vm: TetherViewModel) {
+private fun StatusLine(vm: TetherState) {
     val agent = vm.agent ?: return
     val err = agent.error
     LaunchedEffect(err) {
@@ -291,7 +367,7 @@ private fun StatusLine(vm: TetherViewModel) {
 }
 
 @Composable
-private fun EmptyState(vm: TetherViewModel, modifier: Modifier) {
+private fun EmptyState(vm: TetherState, modifier: Modifier, onClaude: () -> Unit) {
     Column(
         modifier.fillMaxWidth().padding(24.dp),
         verticalArrangement = Arrangement.Center,
@@ -303,7 +379,11 @@ private fun EmptyState(vm: TetherViewModel, modifier: Modifier) {
                 Text("Start a shell on the PC. It keeps running when you leave the app, and the PC can open it from the tray.",
                     style = MaterialTheme.typography.bodyMedium, color = Tokens.Dim)
                 Spacer(Modifier.height(24.dp))
-                Button(onClick = { vm.newSession("powershell") }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+                Button(onClick = onClaude, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+                    Text("Start Claude Code")
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(onClick = { vm.newSession("powershell") }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
                     Text("Start PowerShell")
                 }
                 Spacer(Modifier.height(12.dp))
@@ -333,7 +413,7 @@ private fun EmptyState(vm: TetherViewModel, modifier: Modifier) {
 // ---- terminal pages --------------------------------------------------------------
 
 @Composable
-private fun SessionPager(vm: TetherViewModel, modifier: Modifier) {
+private fun SessionPager(vm: TetherState, modifier: Modifier) {
     val sessions = vm.sessions
     val index = sessions.indexOfFirst { it.id == vm.selected }.coerceAtLeast(0)
     val pager = rememberPagerState(initialPage = index) { sessions.size }
@@ -375,7 +455,7 @@ private fun Modifier.pinchToZoom(onZoom: (Float) -> Unit) = pointerInput(Unit) {
 }
 
 @Composable
-private fun TerminalPage(vm: TetherViewModel, conn: SessionConnection, focused: Boolean) {
+private fun TerminalPage(vm: TetherState, conn: SessionConnection, focused: Boolean) {
     var view by remember { mutableStateOf<TerminalCanvasView?>(null) }
     var menu by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
@@ -387,6 +467,7 @@ private fun TerminalPage(vm: TetherViewModel, conn: SessionConnection, focused: 
             factory = { ctx -> TerminalCanvasView(ctx).also { view = it } },
             update = { v ->
                 v.sticky = vm.sticky
+                v.onGrid = vm::reportGrid
                 v.connection = conn
                 v.fontSizeSp = vm.fontSize
             },
@@ -444,19 +525,24 @@ private fun TerminalPage(vm: TetherViewModel, conn: SessionConnection, focused: 
 // ---- extra keys ------------------------------------------------------------------
 
 @Composable
-private fun ExtraKeys(vm: TetherViewModel) {
+private fun ExtraKeys(vm: TetherState) {
     val keys = vm.sticky
     val send = { code: Int -> keys.sendKey(vm.current, code) }
     val type = { s: String -> keys.sendText(vm.current, s) }
-    Row(Modifier.fillMaxWidth().height(48.dp).background(Tokens.Surface)) {
+    val raw = { s: String -> keys.sendRaw(vm.current, s) }
+    // Scrolls sideways: Claude Code needs more keys than fit across a phone.
+    Row(Modifier.fillMaxWidth().height(48.dp).background(Tokens.Surface).horizontalScroll(rememberScrollState())) {
         Key("ESC", "Escape") { send(KeyEvent.KEYCODE_ESCAPE) }
+        Key("^C", "Control C, interrupt") { raw("\u0003") }
         Key("TAB", "Tab") { send(KeyEvent.KEYCODE_TAB) }
+        Key("⇧TAB", "Shift Tab") { raw("\u001b[Z") }
         Key("CTRL", "Control", active = keys.ctrl) { keys.ctrl = !keys.ctrl }
         Key("ALT", "Alt", active = keys.alt) { keys.alt = !keys.alt }
         Key("←", "Left arrow") { send(KeyEvent.KEYCODE_DPAD_LEFT) }
         Key("↓", "Down arrow") { send(KeyEvent.KEYCODE_DPAD_DOWN) }
         Key("↑", "Up arrow") { send(KeyEvent.KEYCODE_DPAD_UP) }
         Key("→", "Right arrow") { send(KeyEvent.KEYCODE_DPAD_RIGHT) }
+        Key("⇧↵", "New line without sending") { raw("\n") }
         Key("|", "Pipe") { type("|") }
         Key("~", "Tilde") { type("~") }
         Key("/", "Slash") { type("/") }
@@ -465,11 +551,11 @@ private fun ExtraKeys(vm: TetherViewModel) {
 }
 
 @Composable
-private fun RowScope.Key(label: String, description: String, active: Boolean = false, onTap: () -> Unit) {
+private fun Key(label: String, description: String, active: Boolean = false, onTap: () -> Unit) {
     val haptic = LocalHapticFeedback.current
     Box(
         Modifier
-            .weight(1f)
+            .widthIn(min = 44.dp)
             .fillMaxHeight()
             .padding(horizontal = 1.dp, vertical = 4.dp)
             .background(if (active) Tokens.Accent else Color.Transparent, RoundedCornerShape(8.dp))
@@ -482,7 +568,7 @@ private fun RowScope.Key(label: String, description: String, active: Boolean = f
             },
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, color = if (active) Tokens.OnAccent else Tokens.Ink, maxLines = 1,
+        Text(label, Modifier.padding(horizontal = 8.dp), color = if (active) Tokens.OnAccent else Tokens.Ink, maxLines = 1,
             style = Mono.copy(fontSize = if (label.length > 2) 11.sp else 16.sp))
     }
 }

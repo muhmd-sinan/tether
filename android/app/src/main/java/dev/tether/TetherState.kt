@@ -1,6 +1,5 @@
 package dev.tether
 
-import android.app.Application
 import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -8,7 +7,6 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.AndroidViewModel
 import dev.tether.net.AgentClient
 import dev.tether.net.SessionConnection
 import dev.tether.net.SessionInfo
@@ -16,7 +14,16 @@ import dev.tether.term.StickyKeys
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
-class TetherViewModel(app: Application) : AndroidViewModel(app) {
+/**
+ * App-wide connection state. Lives in [TetherApp] rather than a ViewModel so
+ * the control channel can stay open in the background (for Claude alerts)
+ * after the activity is gone.
+ *
+ * Foreground: control channel + every session stream.
+ * Background with alerts on: control channel only, kept alive by [TetherService].
+ * Background with alerts off: nothing.
+ */
+class TetherState(private val app: Context) {
     private val prefs = app.getSharedPreferences("tether", Context.MODE_PRIVATE)
 
     private val http = OkHttpClient.Builder()
@@ -32,6 +39,8 @@ class TetherViewModel(app: Application) : AndroidViewModel(app) {
     val lastHost: String get() = prefs.getString("lastHost", "") ?: ""
     var fontSize by mutableFloatStateOf(prefs.getFloat("fontSize", 13f))
         private set
+    var backgroundAlerts by mutableStateOf(prefs.getBoolean("backgroundAlerts", true))
+        private set
 
     var agent by mutableStateOf<AgentClient?>(null)
         private set
@@ -40,7 +49,12 @@ class TetherViewModel(app: Application) : AndroidViewModel(app) {
     var selected by mutableStateOf<String?>(null)
     val sticky = StickyKeys()
 
-    private var started = false
+    /** Last grid size a terminal view reported; new sessions start at it. */
+    private var grid: Pair<Int, Int>? =
+        prefs.getInt("gridCols", 0).takeIf { it > 0 }?.let { it to prefs.getInt("gridRows", 0) }
+
+    var foreground = false
+        private set
 
     init {
         host?.let { buildAgent(it, port) }
@@ -51,20 +65,39 @@ class TetherViewModel(app: Application) : AndroidViewModel(app) {
     private fun baseUrl(h: String, p: Int) = if (':' in h) "ws://[$h]:$p" else "ws://$h:$p"
 
     private fun buildAgent(h: String, p: Int) {
-        val url = baseUrl(h, p)
-        agent = AgentClient(http, url, ::reconcile) { id -> selected = id }
+        agent = AgentClient(http, baseUrl(h, p), ::reconcile, { id -> selected = id }, ::onAlert)
     }
 
-    fun start() {
-        started = true
+    fun enterForeground() {
+        foreground = true
+        Notifications.clearAlerts(app)
         agent?.start()
         connections.values.forEach { it.start() }
+        syncService()
     }
 
-    fun stop() {
-        started = false
-        agent?.stop()
+    fun enterBackground() {
+        foreground = false
         connections.values.forEach { it.stop() }
+        if (!keepsRunningInBackground()) agent?.stop()
+    }
+
+    /** Called by [TetherService] when it starts (also after the system restarts it). */
+    fun serviceStarted() {
+        if (keepsRunningInBackground()) agent?.start()
+    }
+
+    private fun keepsRunningInBackground() = backgroundAlerts && host != null
+
+    private fun syncService() {
+        if (keepsRunningInBackground()) TetherService.start(app) else TetherService.stop(app)
+    }
+
+    fun updateBackgroundAlerts(on: Boolean) {
+        backgroundAlerts = on
+        prefs.edit().putBoolean("backgroundAlerts", on).apply()
+        if (!on && !foreground) agent?.stop()
+        syncService()
     }
 
     fun connectTo(newHost: String, newPort: Int) {
@@ -73,13 +106,15 @@ class TetherViewModel(app: Application) : AndroidViewModel(app) {
         port = newPort
         prefs.edit().putString("host", newHost).putString("lastHost", newHost).putInt("port", newPort).apply()
         buildAgent(newHost, newPort)
-        if (started) agent?.start()
+        if (foreground) agent?.start()
+        syncService()
     }
 
     fun forgetHost() {
         teardown()
         host = null
         prefs.edit().remove("host").apply()
+        syncService()
     }
 
     private fun teardown() {
@@ -99,7 +134,7 @@ class TetherViewModel(app: Application) : AndroidViewModel(app) {
             if (s.id !in connections) {
                 val c = SessionConnection(http, url, s.id)
                 connections[s.id] = c
-                if (started) c.start()
+                if (foreground) c.start()
             }
         }
         sessions.clear()
@@ -107,7 +142,25 @@ class TetherViewModel(app: Application) : AndroidViewModel(app) {
         if (selected !in ids) selected = list.lastOrNull()?.id
     }
 
-    fun newSession(shell: String) = agent?.newSession(shell)
+    private fun onAlert(id: String, name: String, message: String) {
+        if (foreground && selected == id) return  // already looking at it
+        Notifications.alert(app, id, name, message)
+    }
+
+    /** Opened from a notification: show that session. */
+    fun openSession(id: String) {
+        selected = id
+    }
+
+    fun reportGrid(cols: Int, rows: Int) {
+        if (cols <= 0 || rows <= 0 || grid == cols to rows) return
+        grid = cols to rows
+        prefs.edit().putInt("gridCols", cols).putInt("gridRows", rows).apply()
+    }
+
+    fun newSession(shell: String) = agent?.newSession(shell, grid)
+    fun newClaudeSession(cwd: String) = agent?.newSession("claude", grid, cwd)
+    fun requestProjects() = agent?.requestProjects()
     fun closeSession(id: String) = agent?.close(id)
     fun renameSession(id: String, name: String) = agent?.rename(id, name)
     fun retry() = agent?.retryNow()
@@ -115,10 +168,5 @@ class TetherViewModel(app: Application) : AndroidViewModel(app) {
     fun updateFontSize(sp: Float) {
         fontSize = sp
         prefs.edit().putFloat("fontSize", sp).apply()
-    }
-
-    override fun onCleared() {
-        stop()
-        http.dispatcher.executorService.shutdown()
     }
 }

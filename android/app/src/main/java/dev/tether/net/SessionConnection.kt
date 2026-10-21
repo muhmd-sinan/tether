@@ -50,6 +50,8 @@ class SessionConnection(
     private var running = false
     private var live = false
     private var retries = 0
+    /** This phone's grid size; the agent applies it while the phone is the last to type. */
+    private var wanted: Pair<Int, Int>? = null
     private val reconnect = Runnable { if (running && ws == null) open() }
 
     /** Emulator replies (cursor reports etc.) go to the shell, but not during replay. */
@@ -82,8 +84,20 @@ class SessionConnection(
         if (text.isNotEmpty()) ws?.send(text.toByteArray().toByteString())
     }
 
+    /** Bracketed when the app asked for it, so a multi-line paste isn't run line by line. */
     fun paste(text: String) {
         emulator?.paste(text)
+    }
+
+    fun reportSize(cols: Int, rows: Int) {
+        if (cols <= 0 || rows <= 0 || wanted == cols to rows) return
+        wanted = cols to rows
+        if (live) sendSize()
+    }
+
+    private fun sendSize() {
+        val (c, r) = wanted ?: return
+        ws?.send(JSONObject().put("type", "resize").put("cols", c).put("rows", r).toString())
     }
 
     private fun open() {
@@ -135,6 +149,7 @@ class SessionConnection(
             "live" -> {
                 live = true
                 retries = 0
+                sendSize()
                 state = State.Live
                 onUpdate?.invoke()
             }

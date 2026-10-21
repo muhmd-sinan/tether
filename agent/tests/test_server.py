@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 
 import pytest
 from websockets.asyncio.client import connect
@@ -36,6 +37,15 @@ async def recv_json(ws, kind, timeout=10):
                 data = json.loads(msg)
                 if data["type"] == kind:
                     return data
+
+
+async def recv_size(ws, cols, rows, timeout=10):
+    """Read until the session reports the given size (earlier sizes are skipped)."""
+    async with asyncio.timeout(timeout):
+        while True:
+            size = await recv_json(ws, "size")
+            if (size["cols"], size["rows"]) == (cols, rows):
+                return
 
 
 async def read_until(ws, needle: str, timeout=15) -> str:
@@ -98,26 +108,103 @@ def test_session_roundtrip(run, shell):
     run(body)
 
 
-def test_only_pc_can_resize(run):
+def test_last_typer_sets_size(run):
     async def body(url, manager):
         async with connect(url + "/ctl") as ctl:
             await recv_json(ctl, "sessions")
-            await ctl.send(json.dumps({"type": "new", "shell": "cmd"}))
+            await ctl.send(json.dumps({"type": "new", "shell": "cmd", "cols": 46, "rows": 40}))
             sid = (await recv_json(ctl, "created"))["id"]
+        session = manager.get(sid)
+        assert (session.cols, session.rows) == (46, 40)
 
         async with connect(f"{url}/s/{sid}?role=phone") as phone, \
                 connect(f"{url}/s/{sid}?role=pc") as pc:
             await recv_json(phone, "live")
             await recv_json(pc, "live")
 
-            await phone.send(json.dumps({"type": "resize", "cols": 40, "rows": 20}))
+            # The first viewer to report a size drives; the second is only remembered.
+            await phone.send(json.dumps({"type": "resize", "cols": 46, "rows": 38}))
+            await recv_json(pc, "size")
+            await pc.send(json.dumps({"type": "resize", "cols": 120, "rows": 30}))
             await asyncio.sleep(0.3)
-            assert (manager.get(sid).cols, manager.get(sid).rows) == (120, 30)
+            assert (session.cols, session.rows) == (46, 38)
 
-            await pc.send(json.dumps({"type": "resize", "cols": 100, "rows": 25}))
-            size = await recv_json(phone, "size")
-            assert (size["cols"], size["rows"]) == (100, 25)
+            # Focus reports and device-attribute answers are not typing.
+            await pc.send(b"\x1b[I")
+            await pc.send(b"\x1b[?61;4c")
+            await asyncio.sleep(0.3)
+            assert (session.cols, session.rows) == (46, 38)
+
+            # Typing on the PC hands it the size; typing on the phone takes it back.
+            await pc.send(b"rem\r")
+            await recv_size(phone, 120, 30)
+            await phone.send(b"rem\r")
+            await recv_size(pc, 46, 38)
     run(body)
+
+
+def test_reply_pattern():
+    from tether.sessions import REPLY
+    for reply in ["\x1b[I", "\x1b[O", "\x1b[?62;22c", "\x1b[>0;10;1c", "\x1b[12;40R",
+                  "\x1b[?0u", "\x1bP>|WindowsTerminal\x1b\\", "\x1b]11;rgb:1515/1313/1111\x07",
+                  "\x1b[I\x1b[?1;2c"]:
+        assert REPLY.fullmatch(reply), repr(reply)
+    for typing in ["a", "\r", "\x03", "\x1b", "\x1b[A", "\x1b[Z", "\x1b[200~hi\x1b[201~", "\x1b[I x"]:
+        assert not REPLY.fullmatch(typing), repr(typing)
+
+
+def test_claude_session_runs_in_folder(run, tmp_path):
+    async def body(url, manager):
+        async with connect(url + "/ctl") as ctl:
+            await recv_json(ctl, "sessions")
+            await ctl.send(json.dumps({"type": "new", "shell": "claude", "cwd": "C:\\no\\such\\dir"}))
+            assert "folder not found" in (await recv_json(ctl, "error"))["message"]
+
+        from tether import claude
+        from tether.sessions import shell_command
+        exe, args = shell_command("claude", "C:\\x\\s.json")
+        assert "; claude --settings 'C:\\x\\s.json'" in args and "-NoExit" in args
+        hooks = claude.hook_settings("abcd1234", 9999)["hooks"]
+        cmd = hooks["Stop"][0]["hooks"][0]["command"]
+        assert "-m tether --port 9999 notify --session abcd1234" in cmd and "\\" not in cmd
+        from tether.cli import main as rt_main
+        assert rt_main(["--port", "1", "notify", "--session", "x"]) == 0  # no agent: still exits 0
+        assert set(hooks) == {"Notification", "Stop"}
+        assert claude.alert_text({"hook_event_name": "Stop"}).startswith("Finished")
+        assert claude.alert_text({"hook_event_name": "Notification",
+                                  "message": "Claude needs your permission to use Bash"}) \
+            == "Claude needs your permission to use Bash"
+    run(body)
+
+
+def test_notify_reaches_phone_only_from_localhost(run):
+    async def body(url, manager):
+        session = manager.create("cmd", "build")
+        async with connect(url + "/ctl") as phone, connect(url + "/ctl") as hook:
+            await recv_json(phone, "sessions")
+            await recv_json(hook, "sessions")
+            await hook.send(json.dumps({"type": "notify", "id": session.id, "message": "Finished. Your turn."}))
+            alert = await recv_json(phone, "alert")
+            assert alert == {"type": "alert", "id": session.id, "name": "build",
+                             "message": "Finished. Your turn."}
+    run(body)
+
+
+def test_recent_projects(tmp_path):
+    from tether.claude import _slug, recent_projects
+    home = tmp_path
+    old, new, gone = tmp_path / "old proj", tmp_path / "new.proj", tmp_path / "gone"
+    old.mkdir()
+    new.mkdir()
+    hist = home / ".claude" / "projects"
+    for d, t in ((old, 1000), (new, 2000)):
+        (hist / _slug(str(d))).mkdir(parents=True)
+        os.utime(hist / _slug(str(d)), (t, t))
+    data = {"projects": {str(old): {}, str(old).replace("\\", "/"): {}, str(new): {}, str(gone): {}}}
+    (home / ".claude.json").write_text(json.dumps(data), encoding="utf-8")
+    got = recent_projects(str(home))
+    assert [p["name"] for p in got] == ["new.proj", "old proj"]
+    assert got[0]["path"] == str(new)
 
 
 def test_exit_notifies_viewers(run):

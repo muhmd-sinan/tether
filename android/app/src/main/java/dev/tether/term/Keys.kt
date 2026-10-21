@@ -45,6 +45,12 @@ class StickyKeys {
         conn?.send(applyTo(text.replace("\r\n", "\r").replace('\n', '\r')))
     }
 
+    /** A fixed sequence (Ctrl+C, Shift+Tab, newline) sent as-is; disarms Ctrl/Alt. */
+    fun sendRaw(conn: SessionConnection?, seq: String) {
+        clear()
+        conn?.send(seq)
+    }
+
     companion object {
         fun controlCode(cp: Int): Char? = when (cp) {
             in 'a'.code..'z'.code -> (cp - 'a'.code + 1).toChar()

@@ -1,8 +1,8 @@
 """rt: list phone-started sessions and attach to them from a PC console.
 
 `rt attach` puts the console into raw VT mode and bridges it to the session.
-The PC window size becomes the session size. Ctrl+] or closing the tab
-detaches; the session keeps running.
+Typing here gives the session this window's size (the phone takes it back
+when it types). Ctrl+] or closing the tab detaches; the session keeps running.
 """
 
 from __future__ import annotations
@@ -193,6 +193,10 @@ def main(argv: list[str] | None = None) -> int:
     ag.add_argument("--no-tray", action="store_true")
     au = sub.add_parser("autostart", help="start the agent at sign-in")
     au.add_argument("state", choices=["on", "off"])
+    no = sub.add_parser("notify", help=argparse.SUPPRESS)  # called by Claude Code hooks
+    no.add_argument("--session", required=True)
+    # hooks pass --port after the subcommand; SUPPRESS keeps the top-level value when omitted
+    no.add_argument("--port", type=int, default=argparse.SUPPRESS)
     args = p.parse_args(argv)
 
     if args.cmd == "list":
@@ -204,6 +208,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "agent":
         from .agent import main as agent_main
         return agent_main(["--port", str(args.port)] + (["--no-tray"] if args.no_tray else []))
+    if args.cmd == "notify":
+        from .claude import notify
+        return notify(args.port, args.session)
     if args.cmd == "autostart":
         from .agent import set_autostart
         set_autostart(args.state == "on")
