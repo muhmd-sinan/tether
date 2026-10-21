@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tether-agent"
+version = "0.1.0"
+description = "Windows host agent for Tether: phone-started shell sessions over Tailscale"
+requires-python = ">=3.11"
+dependencies = [
+    "pywinpty==3.1.0",
+    "websockets==17.3",
+    "pystray==0.19.5",
+    "pillow==13.0.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+
+[project.scripts]
+rt = "tether.cli:main"
+tether-agent = "tether.agent:main"
+
+[tool.setuptools]
+packages = ["tether"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

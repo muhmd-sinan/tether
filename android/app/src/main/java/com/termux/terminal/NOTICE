@@ -1,0 +1,6 @@
+The files in this directory are the terminal-emulator library from
+termux-app v0.118.1 (https://github.com/termux/termux-app/tree/v0.118.1/terminal-emulator),
+derived from Android-Terminal-Emulator by Jack Palevich, and are licensed under
+the Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+They are vendored unmodified. Tether does not use TerminalSession/JNI (local
+process spawning); the native library is never loaded.

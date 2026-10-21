@@ -1,0 +1,8 @@
+<resources>
+    <color name="tether_bg">#151311</color>
+    <style name="Theme.Tether" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/tether_bg</item>
+        <item name="android:statusBarColor">@color/tether_bg</item>
+        <item name="android:navigationBarColor">@color/tether_bg</item>
+    </style>
+</resources>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ">_" prompt glyph, kept inside the 66dp adaptive-icon safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M38,40 L52,54 L38,68"
+        android:strokeWidth="7"
+        android:strokeColor="#F0743E"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M57,68 L72,68"
+        android:strokeWidth="7"
+        android:strokeColor="#F0743E"
+        android:strokeLineCap="round" />
+</vector>
