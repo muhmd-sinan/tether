@@ -32,7 +32,7 @@ pip install -e agent
 
 Then double-click **`Start Tether.bat`**. It starts Tailscale if needed, starts
 the Tether agent (a `>_` icon in the tray), and prints the PC's Tailscale
-address, e.g. `On the phone, connect to 100.83.213.64 port 8722.`
+address, e.g. `On the phone, connect to 100.x.y.z port 8722.`
 
 To start the agent automatically at sign-in:
 
